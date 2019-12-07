@@ -31,7 +31,6 @@ architecture datapathc_arc of datapathc is
 	constant JAL: std_logic_vector(3 downto 0) := "1000";
 	constant JLR: std_logic_vector(3 downto 0) := "1001";
 	constant R7:  std_logic_vector(2 downto 0) := "111";
-
 	signal rst : std_logic;
 	signal PC : std_logic_vector(15 downto 0);
 	signal Iout1 : std_logic_vector(15 downto 0);
@@ -55,10 +54,14 @@ architecture datapathc_arc of datapathc is
 	signal pack_1_queueout : std_logic_vector(58 downto 0);
 	signal pack_2_queueout : std_logic_vector(58 downto 0);
 	signal sb_rst : std_logic;
+	signal sb_write_after_flush_1 : std_logic;
+	signal sb_write_after_flush_2 : std_logic;
 	signal sb_wr1 : std_logic;
 	signal sb_wr2 : std_logic;
 	signal sb_clr1 : std_logic;
 	signal sb_clr2 : std_logic;
+	signal regwr_1 : std_logic_vector(2 downto 0);
+	signal regwr_2 : std_logic_vector(2 downto 0);
 	signal PC_ID_1 : std_logic_vector(15 downto 0);
 	signal PC_ID_2 : std_logic_vector(15 downto 0);
 	signal opcode_ID_1 : std_logic_vector(3 downto 0);
@@ -77,6 +80,8 @@ architecture datapathc_arc of datapathc is
 	signal sbB_1 : std_logic;
 	signal sbA_2 : std_logic;
 	signal sbB_2 : std_logic;
+	signal sbC_1 : std_logic;
+	signal sbC_2 : std_logic;
 	signal sb_stall_1 : std_logic;
 	signal sb_stall_2 : std_logic;
 	signal write1 : std_logic_vector(15 downto 0);
@@ -314,6 +319,7 @@ begin
 		PC <= PCin;
 	  end if;
 	end process PCregister;
+-- Instruction Fetch
 	IF_PP : process(clk, rst) is -- @suppress "Incomplete sensitivity list. Missing signals: Iout2(15 downto 12), Iout2, Iout1, Iout1(15 downto 12)"
 		variable Iout1var,PCvar: std_logic_vector(15 downto 0);
 		variable next_state,pc_stopvar : std_logic:='0';
@@ -368,14 +374,14 @@ begin
 			state <= next_state;
 		end if;
 	end process IF_PP;
-	-- Instruction Decode -------------------------------------------------------------------------------------
+-- Instruction Decode -------------------------------------------------------------------------------------
 	opcode_1 <= IR_IF_1(15 downto 12);
 	opcode_2 <= IR_IF_2(15 downto 12);
 	SE6_1	<= std_logic_vector(resize(signed(IR_IF_1(5 downto 0)), 16));
 	SE6_2	<= std_logic_vector(resize(signed(IR_IF_2(5 downto 0)), 16));
 	valid_ID_var_1 <= valid_IF_1 and flush_ID_1;
 	valid_ID_var_2 <= valid_IF_2 and flush_ID_2;
----- Used in LM/SM
+	---- Used in LM/SM
 	some_sig2 <= lmsm_locations when some_sig='1'
 			else IR_IF_1(7 downto 0);
 	temp1 <= std_logic_vector(unsigned(some_sig2)-1);
@@ -392,7 +398,7 @@ begin
 	lmsm_locations_next <= some_sig2 and temp1;
 	lmsm_run  <= '0' when (opcode_1(3 downto 1)="011" and valid_IF_1='1') and (lmsm_locations_next="00000000" or IR_IF_1(7 downto 0)="00000000")
 			else '1';
--------------------
+    -- First ID pipeline
 	ID_PP_1 : process(clk, rst) is -- @suppress "Incomplete sensitivity list. Missing signals: ID_en"
 	begin
 		if rst = '1' then
@@ -668,7 +674,8 @@ begin
 	end process ID_PP_2;
 	pack_2_var <= PC_ID_2var&A1_ID_2var&A2_ID_2var&Aw_ID_2var&SE_ID_2var&SEa_ID_2var&CZ_ID_2var&ALUop_ID_2var&Cmod_ID_2var&Zmod_ID_2var&opcode_ID_2var
 		&PCstore_ID_2var&PCcompute_ID_2var&valid_ID_2var&Reg_wr_ID_2var&readA_2var&readB_2var&"00";
-	-- Register Read access -----------------------------------------------------------------------------------
+-- Register Read access -----------------------------------------------------------------------------------
+	--Queue
 	que: entity work.queue
 		generic map(
 			DATA_WIDTH => 59,
@@ -743,7 +750,7 @@ begin
 			lmsm_write => unused1,
 			lmsm_sel   => unused2
 		);
-	--- Scoreboard
+	-- Scoreboard
 	scoreboard:entity work.scoreboard
 		port map(
 			clk  	=> clk,
@@ -752,28 +759,37 @@ begin
 			wr2     => sb_wr2,
 			clr1    => sb_clr1,
 			clr2    => sb_clr2,
-			regwr_1 => Aw_ID_1,
-			regwr_2 => Aw_ID_2,
+			regwr_1 => regwr_1,
+			regwr_2 => regwr_2,
 			regclr1 => wSel1,
 			regclr2 => wSel2,
 			regA_1  => A1_ID_1,
 			regB_1  => A2_ID_1,
 			regA_2  => A1_ID_2,
 			regB_2  => A2_ID_2,
+			regC_1  => Aw_ID_1,
+			regC_2  => Aw_ID_2,
 			doutA_1 => sbA_1,
 			doutB_1 => sbB_1,
 			doutA_2 => sbA_2,
-			doutB_2 => sbB_2
+			doutB_2 => sbB_2,
+			doutC_1 => sbC_1,
+			doutC_2 => sbC_2
 		);
 	sb_rst <= flush_till_RR_Ex or rst;
-	sb_wr1 <= '1' when (Reg_wr_ID_1='1' and valid_RRvar_1='1') else '0';
-	sb_wr2 <= '1' when (Reg_wr_ID_2='1' and valid_RRvar_2='1') else '0';
-	sb_clr1 <= '1' when (supposed_to_write_MA_1='1' and valid_MA_1='1') else '0';
-	sb_clr2	<= '1' when (supposed_to_write_MA_2='1' and valid_MA_2='1') else '0';
-	sb_stall_1 <= '1' when (((sbA_1='1' and readA_1='1' and A1_ID_1/=R7) or (sbB_1='1' and readB_1='1' and A2_ID_1/=R7)) and valid_ID_1='1' and dirty='0')
+	sb_write_after_flush_1 <= '1' when (opcode_RR_1=JLR or (sb_write_after_flush_2='1' and Reg_wr_RR_1='1') or (opcode_RR_2=LHI and Aw_RR_2=R7)) and valid_RR_1='1' else '0';
+	sb_write_after_flush_2 <= '1' when opcode_RR_2=JLR and valid_RR_2='1' else '0';
+	sb_wr1 <= (Reg_wr_ID_1 and valid_RRvar_1) or sb_write_after_flush_1;
+	sb_wr2 <= (Reg_wr_ID_2 and valid_RRvar_2) or sb_write_after_flush_2;
+	regwr_1 <= Aw_RR_1 when sb_write_after_flush_1='1' else Aw_ID_1;
+	regwr_2 <= Aw_RR_2 when sb_write_after_flush_2='1' else Aw_ID_2;
+	sb_clr1 <= (supposed_to_write_MA_1 and valid_MA_1);
+	sb_clr2	<= (supposed_to_write_MA_2 and valid_MA_2);
+	sb_stall_1 <= '1' when (((sbA_1='1' and readA_1='1' and A1_ID_1/=R7) or (sbB_1='1' and readB_1='1' and A2_ID_1/=R7) or (sbC_1='1' and Reg_wr_ID_1='1' and Aw_ID_1/=R7)) and valid_ID_1='1' and dirty='0')
 			else '0';
-	sb_stall_2 <= '1' when (((sbA_2='1' and readA_2='1' and A1_ID_2/=R7) or (sbB_2='1' and readB_2='1' and A2_ID_2/=R7)) and valid_ID_2='1')
+	sb_stall_2 <= '1' when (((sbA_2='1' and readA_2='1' and A1_ID_2/=R7) or (sbB_2='1' and readB_2='1' and A2_ID_2/=R7) or (sbC_2='1' and Reg_wr_ID_2='1' and Aw_ID_2/=R7)) and valid_ID_2='1')
 			else '0';
+	--
 	wR7var <= valid_MA_1 or valid_MA_2;
 	rf : entity work.register_file
 		port map(
@@ -900,7 +916,7 @@ begin
 			end if;
 		end if;
 	end process dirty_bit;
-	-- Instruction Execute ------------------------------------------------------------------------------------
+-- Instruction Execute ------------------------------------------------------------------------------------
 	eq_1 <= '1' when D1_1=D2_1 else '0';
 	eq_2 <= '1' when D1_2=D2_2 else '0';
 
@@ -1009,7 +1025,7 @@ begin
 			C <= '0';
 			Z <= '0';
 			lmsm_initial_address<=(others => '0');
-			lmsm_next <= "0000000000000001";
+			lmsm_next <= x"0001";
 		elsif (rising_edge(clk)) then
 			if (Cmod_RR_1 = '1' and C_mod_var_1 = '1' and valid_RR_1='1') or (Cmod_RR_2 = '1' and C_mod_var_2 = '1' and valid_RR_2='1') then
 				C <= Cout;
@@ -1019,13 +1035,13 @@ begin
 			end if;
 			if(lmsm_write_RR='1') then
 				lmsm_initial_address <= D1_1;
-				lmsm_next <= "0000000000000001";
+				lmsm_next <= x"0001";
 			else
 				lmsm_next <= std_logic_vector(unsigned(lmsm_next)+1);
 			end if;
 		end if;
 	end process flags;
-	---- Memory access ----------------------------------------------------------------
+-- Memory access ------------------------------------------------------------------------------------------
 	ram : entity work.RAM_data
 		port map(
 			address    => RAM_address,
@@ -1081,7 +1097,7 @@ begin
 			supposed_to_write_MA_2 <= supposed_to_write_Ex_2;
 		end if;
 	end process MA_PP_2;
----- Register Write Back --------------------------------------------------------
+-- Register Write Back ------------------------------------------------------------------------------------
 	wEN1   <= Reg_wr_MA_1 and valid_MA_1;
 	wEN2   <= Reg_wr_MA_2 and valid_MA_2;
 
@@ -1093,7 +1109,8 @@ begin
 	        else D2var_1 when haz_jlr_1='1' or haz_jal_jlr_r7_1='1'
 	        else D2var_2 when haz_jlr_2='1' or haz_jal_jlr_r7_2='1'
 	        else std_logic_vector(unsigned(PC)+2);
-
+-- Hazards,Flushes and Stalls
+	-- PC Hazards
 	haz_lw_lm_r7_1 <= '1' when ((opcode_EX_1=LW or opcode_EX_1=LM) and Aw_EX_1=R7 and valid_EX_1='1') else '0';
 	haz_lw_lm_r7_2 <= '1' when ((opcode_EX_2=LW or opcode_EX_2=LM) and Aw_EX_2=R7 and valid_EX_2='1') else '0';
 	haz_ex_R7_2    <= '1' when (not(opcode_RR_2=LW or opcode_RR_2=LM) and Reg_wr_Exvar_2='1' and Aw_RR_2=R7 and valid_RR_2='1') else '0';
@@ -1107,26 +1124,26 @@ begin
 	haz_jal_jlr_r7_1 <= '1' when ((opcode_ID_1=JLR or opcode_ID_1=JAL) and valid_ID_1='1' and Aw_ID_1=R7) else '0';
 	haz_jal_jlr_r7_2 <= '1' when ((opcode_ID_2=JLR or opcode_ID_2=JAL) and valid_ID_2='1' and sb_stall_1='0' and Aw_ID_2=R7) else '0';
 	haz_jal_jlr_r7  <= haz_jal_jlr_r7_1 or haz_jal_jlr_r7_2;
-	haz_flag_dependency <= '1' when ((CZ_ID_2="10" and Cmod_ID_1='1') or (CZ_ID_2="01" and Zmod_ID_1='1'))
-									and (sb_stall_1='0') and (valid_ID_1='1' and valid_ID_2='1') else '0';
+	-- Other hazards
+	haz_flag_dependency <= '1' when ((CZ_ID_2="10" and Cmod_ID_1='1') or (CZ_ID_2="01" and Zmod_ID_1='1')) and (sb_stall_1='0') and (valid_ID_1='1' and valid_ID_2='1') else '0';
 	haz_both_MA <= '1' when ((opcode_ID_1=LW or opcode_ID_1=SW) and (opcode_ID_2=LW or opcode_ID_2=SW)) and (sb_stall_1='0') else '0';
 	haz_ADZ_LW  <= '1' when (((CZ_ID_1="01" and valid_ID_1='1') or (CZ_ID_2="01" and valid_ID_2='1')) and ((opcode_RR_1=LW and valid_RR_1='1') or (opcode_RR_2=LW and valid_RR_2='1'))) else '0';
 	haz_interdependence <= '1' when ((A1_ID_2=Aw_ID_1 and readA_2='1' and sbA_2='0') or (A2_ID_2=Aw_ID_1 and readB_2='1' and sbB_2='0')) and sb_stall_1='0' and valid_ID_1='1' and valid_ID_2='1' and opcode_ID_1/=JLR else '0'; -- to handle pending dependent writes
 	haz_type1 	  <= '1' when (haz_flag_dependency='1' or haz_interdependence='1' or haz_both_MA='1' or haz_jal_jlr_r7_2='1') and dirty='0' else '0';
+	-- Flushes
 	flush_MA_1    <= '0' when haz_lw_lm_r7_1='1' else '1';
 	flush_MA_2    <= '0' when haz_lw_lm_r7_2='1' or haz_lw_lm_r7_1='1' else '1';
 	flush_Ex_1	  <= '0' when haz_ex_R7_1='1' or haz_lw_lm_r7_1='1' or haz_lw_lm_r7_2='1' else '1';
 	flush_Ex_2	  <= '0' when haz_ex_R7_2='1' or haz_beq_jal_1='1' or haz_ex_R7_1='1' or haz_lw_lm_r7_1='1' or haz_lw_lm_r7_2='1' else '1';
 	flush_RR_1    <= '0' when (queue_stall='1' and haz_type1='0') or (flush_till_RR_Ex='1' and haz_jlr_1='0' and haz_jlr_2='0' and haz_lhi_R7_2='0') or haz_jal_jlr_r7_1='1' else '1';
 	flush_RR_2	  <= '0' when queue_stall='1' or (flush_till_RR_Ex='1' and haz_jlr_2='0') or haz_jal_jlr_r7='1' else '1';
-	flush_ID_1	  <= '0' when flush_till_RR_Ex='1' else '1';
-	flush_ID_2	  <= '0' when flush_till_RR_Ex='1' else '1';
-	flush_till_RR_Ex <= '1' when haz_beq_jal_2='1' or haz_beq_jal_1='1' or haz_ex_R7_1='1' or haz_ex_R7_2='1' or haz_lw_lm_r7_1='1' or haz_lw_lm_r7_2='1' or haz_lhi_R7_1='1' or haz_lhi_R7_2='1' or haz_jlr_1='1' or haz_jlr_2='1' else '0';
-	queue_stall	  <= '1' when (haz_type1='1' or haz_ADZ_LW='1' or sb_stall_1='1' or sb_stall_2='1' or haz_jal_jlr_r7='1') and flush_till_RR_Ex='0' else '0';
-
-	lmsm_stall <= '1' when (opcode_1(3 downto 1)="011" and lmsm_run='1' and valid_IF_1='1' and flush_ID_1='1')
-			 else '0';
-	IF_en <= '0' when (queue_full='1' and queue_read='0') or haz_jal_jlr_r7='1' or lmsm_stall='1' else '1';
-	ID_en <= '0' when (queue_full='1' and queue_read='0') or haz_jal_jlr_r7='1' else '1';
-	wPC   <= '0' when (queue_full='1' and queue_read='0') or lmsm_stall='1' or pc_stop='1' else '1';
+	flush_ID_1	  <= not flush_till_RR_Ex;
+	flush_ID_2	  <= flush_ID_1;
+	flush_till_RR_Ex <= haz_beq_jal_2 or haz_beq_jal_1 or haz_ex_R7_1 or haz_ex_R7_2 or haz_lw_lm_r7_1 or haz_lw_lm_r7_2 or haz_lhi_R7_1 or haz_lhi_R7_2 or haz_jlr_1 or haz_jlr_2;
+	--Stalls
+	queue_stall	  <= (haz_type1 or haz_ADZ_LW or sb_stall_1 or sb_stall_2 or haz_jal_jlr_r7) and flush_till_RR_Ex;
+	lmsm_stall <= '1' when (opcode_1(3 downto 1)="011" and lmsm_run='1' and valid_IF_1='1' and flush_ID_1='1') else '0';
+	IF_en <= not ((queue_full and not queue_read) or haz_jal_jlr_r7 or lmsm_stall);
+	ID_en <= not ((queue_full and not queue_read) or haz_jal_jlr_r7);
+	wPC   <= not ((queue_full and not queue_read) or lmsm_stall or pc_stop);
 end datapathc_arc;
